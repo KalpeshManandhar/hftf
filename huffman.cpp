@@ -3,53 +3,7 @@
 #include <string.h>
 
 #include "queue.h"
-
-
-
-struct Node{
-    uint8_t value;
-    uint8_t codelength;
-    uint32_t freq;
-    uint64_t code;
-    Node *left,*right;
-    enum NodeType{Leaf, NotLeaf};
-    NodeType type;
-};
-
-struct BinaryTree{
-    Node *root = NULL;
-};
-
-struct Huffman_Data{
-    uint32_t totalBytes_unencoded;      // total bytes of the unencoded data 
-    uint32_t uniqueSymbols;				// total number of unique codes/symbols used
-    uint64_t totalBits_encoded;         // total bits of the encoded data 
-    BinaryTree huffmanTree;             // huffman tree
-	uint8_t *data;                      // actual encoded data 
-    Node* nodes[256] = {NULL};
-};
-
-
-struct Huffman_File{
-	struct Huffman_FileHeader{              // 4+2+2+4+4
-        char hf[4];                         // hftf
-        uint16_t reserved;                  // 0000
-        uint16_t compressionLvl;            // number of compressions of same file
-        uint32_t offset_data;   			// offset from beginning of file to data
-        uint32_t offset_symbols;			// offset from beginning of file to symbols
-    }header;
-	Huffman_Data data;
-    /*
-        20 bytes header
-        4 bytes -> total unencoded bytes
-        4 bytes -> total symbols
-        8 bytes -> total encoded bits
-        10 bytes (value + codelength + code) for each symbol
-        actual code for each byte
-    */
-};
-
-
+#include "huffman.h"
 
 
 Node *newNode(){
@@ -96,13 +50,24 @@ void inorderTraverse(Node *root, uint32_t code, uint8_t codelen){
     if (root->type == Node::Leaf){
         root->codelength = codelen;
         root->code = code;
-        // fprintf(stdout, "\n%u = %llx, %u ",root->value, root->code, root->codelength);
+        fprintf(stdout, "\n%u = %llx, %u ",root->value, root->code, root->codelength);
     }
     if (root->right)
         inorderTraverse(root->right, (code<<1)|1, codelen+1);
 }
 
 
+uint32_t height(Node *t){
+    if (t == NULL){
+        return(1);
+    }
+    uint32_t l = height(t->left);
+    uint32_t r = height(t->right);
+    uint32_t max = (l>r)?l:r;
+    return(max+1);
+}
+
+// compresses a given byte array into huffman codes and tree
 Huffman_Data huffmanCompress(void * data, uint32_t n){
     Huffman_Data hdata;
     uint32_t frequencies[256] = { 0 };
@@ -131,7 +96,7 @@ Huffman_Data huffmanCompress(void * data, uint32_t n){
     }
 
     uint32_t size = queue.size;
-    // fprintf(stdout, "No of nodes = %u\n", size);
+    fprintf(stdout, "No of nodes = %u\n", size);
 
     // create the huffman tree
     while (queue.size>1){
@@ -145,6 +110,8 @@ Huffman_Data huffmanCompress(void * data, uint32_t n){
         queue.enqueue(ab, ab->freq);
         hdata.huffmanTree.root = ab;
     }
+
+    printf("Height of tree: %u\n",height(hdata.huffmanTree.root));
 
     // get the codes to the nodes from huffman tree
     // left = 0
@@ -182,13 +149,14 @@ Huffman_Data huffmanCompress(void * data, uint32_t n){
         }
     }
     
-    hdata.totalBits_encoded = destByteCursor * 8 + destBitCursor;
+    hdata.totalBits_encoded = ((uint64_t)destByteCursor * 8 + (uint64_t)destBitCursor);
     hdata.totalBytes_unencoded = n;
 
     return hdata;
 }
 
 
+// compresses a given file 
 Huffman_File compressFile(const char *srcFilePath){
     uint32_t filesize;
     uint8_t *buffer = readFileToBuffer(srcFilePath, &filesize);
@@ -250,6 +218,8 @@ uint64_t writeFile_encoded(Huffman_File *file, const char *filename){
     return(filesize);
 }
 
+
+// adds nodes to recreate the huffman tree from given codes
 void addCodeToTree(BinaryTree *huffmanTree, uint64_t code, uint8_t codelength, uint8_t value){
     if (!huffmanTree->root){
         huffmanTree->root = newNode();
@@ -282,31 +252,37 @@ void addCodeToTree(BinaryTree *huffmanTree, uint64_t code, uint8_t codelength, u
 }
 
 
-
+// decodes given data with huffman tree
 uint8_t * huffmanDecompress(Huffman_Data *hdata){
     uint8_t *decoded = new uint8_t[hdata->totalBytes_unencoded];
     uint32_t destByteCursor=0, srcByteCursor=0;
     uint64_t srcBitCursor=0;
-    while (destByteCursor < hdata->totalBytes_unencoded){
+    while (destByteCursor < hdata->totalBytes_unencoded && (srcByteCursor*8 + srcBitCursor)<hdata->totalBits_encoded){
         Node *ptr = hdata->huffmanTree.root;
+        int height = 0;
         while (ptr->type != Node::Leaf){
             uint8_t dir = hdata->data[srcByteCursor]&(0x01<<(7-srcBitCursor));
             if (dir == 0)
                 ptr = ptr->left;
             else 
                 ptr = ptr->right;
+            height++;
             srcBitCursor++;
             if (srcBitCursor == 8){
                 srcByteCursor++;
                 srcBitCursor = 0;
             }
         }
+        if (height > 8) {
+            printf("Height: %d\n", height);
+        }
         decoded[destByteCursor++] = ptr->value;
     }
     return(decoded);
 }
 
-
+// decodes the given .hftf file and returns an array of bytes
+// sets the number of bytes in noofbytes
 uint8_t * decompressFile(const char* srcFilepath, uint32_t *noofbytes){
     if(strcmp(srcFilepath + strlen(srcFilepath) -1-4, ".hftf")){
         fprintf(stderr, "Not a valid compressed file. A valid file is <file>.hftf");
@@ -337,8 +313,9 @@ uint8_t * decompressFile(const char* srcFilepath, uint32_t *noofbytes){
         uint64_t code = *(uint64_t*)(buffer+cursor);
         cursor += sizeof(code);
         addCodeToTree(&f.data.huffmanTree, code, codelength, value);
+        printf("Val: %c Code: %lld Length: %u\n", value, code, codelength);
     }
-
+    printf("Height of tree constructed: %u\n",height(f.data.huffmanTree.root));
 
     // actual encoded data
     f.data.data = buffer + cursor;
@@ -362,6 +339,7 @@ void writeFile_decompressed(const char *filename, uint8_t *decoded, uint32_t noO
     delete[]decoded;
 }
 
+#ifdef HF_EXE
 #define COMMAND_STRUCT "<.exe> zip <input filepath> <output filename>\n<.exe> unzip <.hftf file path> <output filename.extension>\n"
 
 int main(int argc, char **argv){
@@ -392,3 +370,4 @@ int main(int argc, char **argv){
     }
     return 0;
 }
+#endif //HF_EXE
